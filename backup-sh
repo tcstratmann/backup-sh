@@ -1,0 +1,125 @@
+#!/bin/bash
+#
+# Backup-Script
+#
+# configuration: .backup/
+#   backup.exclude | backup.include
+#
+# log file: backup.log
+#
+# to run at low  I/O and CPU priority call:
+#   sudo nice -n 19 ionice -c2 -n7 ./backup-sh
+#
+# for external backup storage supply path as argument (with trailing slash):
+#   ./backup-sh /media/PENDRIVE/
+#
+# by tcstratmann - 2018
+
+# get human-readable timestamp
+DATE=$(date +%Y-%m-%d-%H%M%S)
+
+# set log file name
+LOG_FILE="backup.log"
+
+# set home directory to backup
+HOME="/home/USER/"
+
+# set backup storage path
+if [ $# -eq 0 ]
+then
+	BACKUP_PATH="/media/HDD/" # default backup storage
+else
+	BACKUP_PATH=$1 # backup storage given as argument
+fi
+
+# synchronize cached writes to persistent storage
+echo "synchronizing cached writes to persistent storage..."
+sync
+
+# write log file header
+echo "Backup -- $DATE" | tee $LOG_FILE
+
+# clean/optimize and backup pacman database
+echo "cleaning orphaned packages..." | tee -a $LOG_FILE
+if pacman -Rs $(pacman -Qttdq) 2>&1 | tee -a $LOG_FILE; then # remove orphaned packages
+	echo -e '\E[32m'"\033[1m[ok]\033[0m"
+	echo "[ok]" >> $LOG_FILE
+else
+	echo -e '\E[31m'"\033[1m[failed]\033[0m"
+	echo "[failed]" >> $LOG_FILE
+fi
+echo "optimizing package database..." | tee -a $LOG_FILE
+if pacman-optimize 2>&1 | tee -a $LOG_FILE; then # optimize package database
+	echo -e '\E[32m'"\033[1m[ok]\033[0m"
+	echo "[ok]" >> $LOG_FILE
+else
+	echo -e '\E[31m'"\033[1m[failed]\033[0m"
+	echo "[failed]" >> $LOG_FILE
+fi
+echo "backing up package database to ${BACKUP_PATH}pacman_database.tar.bz2..." | tee -a $LOG_FILE
+if tar -cjf $BACKUP_PATH/pacman_database.tar.bz2 /var/lib/pacman/local 2>&1 | tee -a $LOG_FILE; then
+	sha256sum $BACKUP_PATH/pacman_database.tar.bz2 > $BACKUP_PATH/pacman_database.tar.bz2.sha256
+	echo -e '\E[32m'"\033[1m[ok]\033[0m"
+	echo "[ok]" >> $LOG_FILE
+else
+	echo -e '\E[31m'"\033[1m[failed]\033[0m"
+	echo "[failed]" >> $LOG_FILE
+fi
+
+# backup list of installed packages
+echo "saving list of installed packages to ${BACKUP_PATH}package.list..." | tee -a $LOG_FILE
+if pacman -Qeq > $BACKUP_PATH/package.list 2>&1 | tee -a $LOG_FILE; then
+	sha256sum $BACKUP_PATH/package.list > $BACKUP_PATH/package.list.sha256
+	echo -e '\E[32m'"\033[1m[ok]\033[0m"
+	echo "[ok]" >> $LOG_FILE
+else
+	echo -e '\E[31m'"\033[1m[failed]\033[0m"
+	echo "[failed]" >> $LOG_FILE
+fi
+
+# OPTIONAL: backup android phone incl. sd card
+adb get-state # check for connected device
+if [ $? -eq 0 ]
+then
+	echo "backing up android phone to ${BACKUP_PATH}phone-backup.ab..." | tee -a $LOG_FILE
+	if adb backup -all -shared -f ${BACKUP_PATH}phone-backup.ab 2>&1 | tee -a $LOG_FILE & wait $!; then
+		sha256sum ${BACKUP_PATH}phone-backup.ab > ${BACKUP_PATH}phone-backup.ab.sha256
+		echo -e '\E[32m'"\033[1m[ok]\033[0m"
+		echo "[ok]" >> $LOG_FILE
+	else
+		echo -e '\E[31m'"\033[1m[failed]\033[0m"
+		echo "[failed]" >> $LOG_FILE
+	fi
+else
+	echo "no android phone connected, skipping phone backup..." | tee -a $LOG_FILE
+fi
+
+# rdiff-backup to BACKUP_PATH, --terminal-verbosity 2 -> silent
+echo "creating rdiff-backup of system to ${BACKUP_PATH}backup/..." | tee -a $LOG_FILE
+if rdiff-backup --print-statistics --terminal-verbosity 3 \
+    --exclude-globbing-filelist $HOME/.backup/backup.exclude \
+    --include-globbing-filelist $HOME/.backup/backup.include \
+    --exclude-sockets --exclude / / $BACKUP_PATH/backup/ 2>&1 | tee -a $LOG_FILE; then
+
+	echo -e '\E[32m'"\033[1m[Backup ok]\033[0m" 1>&2 # log to stderr
+	echo "[Backup ok]" >> $LOG_FILE
+
+	# remove incremental backups older than one month
+	echo "removing incremental backups older than one month from ${BACKUP_PATH}backup/..." | tee -a $LOG_FILE
+	if rdiff-backup --force --remove-older-than 1M $BACKUP_PATH/backup/ 2>&1 | tee -a $LOG_FILE; then
+		echo -e '\E[32m'"\033[1m[ok]\033[0m"
+		echo "[ok]" >> $LOG_FILE
+	else
+		echo -e '\E[31m'"\033[1m[failed]\033[0m"
+		echo "[failed]" >> $LOG_FILE
+	fi
+
+else
+	echo -e '\E[31m'"\033[1m[Backup failed]\033[0m" 1>&2 # log to stderr
+	echo "Backup failed!" >> $LOG_FILE
+	exit 1
+fi
+
+# synchronize cached writes to persistent storage
+echo "synchronizing cached writes to persistent storage..."
+sync
